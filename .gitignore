@@ -1,0 +1,5 @@
+.vscode/
+build.js
+tuxphones.node
+build/
+node_modules/

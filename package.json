@@ -1,0 +1,16 @@
+{
+  "name": "tuxphones",
+  "version": "1.0.0",
+  "description": "",
+  "main": "Tuxphones.plugin.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Jack Hogan",
+  "license": "MIT",
+  "dependencies": {
+    "electron": "^13.6.2",
+    "electron-rebuild": "^3.2.5",
+    "node-gyp": "^8.4.1"
+  }
+}
