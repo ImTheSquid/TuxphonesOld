@@ -1,7 +1,7 @@
 #!/bin/sh
 rm -r build/
 npm install --openssl_fips=X
-./node_modules/.bin/node-gyp --openssl_fips=X rebuild --target=13.4.0 --arch=x64 --dist-url=https://electronjs.org/headers/
+./node_modules/.bin/node-gyp --openssl_fips=X rebuild --target=13.4.0 --arch=x64 --dist-url=https://electronjs.org/headers/ --debug
 
 # Copy binary data into index.js to bundle
 cp index.js build.js

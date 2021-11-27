@@ -4,10 +4,8 @@ module.exports = (Plugin, Library) => {
 
     class Tuxphones extends Plugin {
         writeNativeCode() {
-            const fs = require('fs');
-            const path = require('path');
-            const nativePath = path.join(BdApi.Plugins.folder, 'tuxphones.node');
-            fs.writeFileSync(nativePath, Buffer.from(nativeCodeHex, 'hex'));
+            const nativePath = require('path').join(BdApi.Plugins.folder, 'tuxphones.node');
+            require('fs').writeFileSync(nativePath, Buffer.from(nativeCodeHex, 'hex'));
             this.nativeCode = require(nativePath);
             BdApi.showToast('Native code loaded!', {type: 'success'});
         }
@@ -19,6 +17,8 @@ module.exports = (Plugin, Library) => {
             }
 
             this.writeNativeCode();
+
+            this.nativeCode.onStart(null);
         }
 
         getSettingsPanel() {
@@ -26,7 +26,7 @@ module.exports = (Plugin, Library) => {
         }
 
         onStop() {
-
+            this.nativeCode.onStop();
         }
     }
 
