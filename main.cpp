@@ -49,6 +49,9 @@ uint32_t combinedSinkIndex;
 // Original application sink, held while capturing to be able to restore functionality
 uint32_t sinkInputRestoreIndex;
 
+// Opus encoder
+OpusEncoder *encoder;
+
 void GetSinkInfoCallback(pa_context *context, const pa_sink_info *info, int eol, void *userData) {
     // Copy data to foundSinks
     if (info) {
@@ -86,8 +89,9 @@ void GenericSuccessCallback(pa_context *context, int success, void *userData) {
 void GetSinkInputInfoCallback(pa_context *context, const pa_sink_input_info *info, int eol, void *userData) {
     auto *infoVec = static_cast<std::vector<applicationInfo>*>(userData);
     if (info) {
-        char *str = (char*)malloc(sizeof(char*) * 16);
-        strcpy(str, pa_proplist_gets(info->proplist, "application.process.id"));
+        const char *pid = pa_proplist_gets(info->proplist, "application.process.id");
+        char *str = static_cast<char*>(malloc(strlen(pid) + 1));
+        strcpy(str, pid);
         infoVec->push_back(applicationInfo{
             .name = std::string(info->name),
             .pid = atoi(str),
@@ -99,6 +103,20 @@ void GetSinkInputInfoCallback(pa_context *context, const pa_sink_input_info *inf
 
     if (eol) {
         pa_threaded_mainloop_signal(paMainLoop, 0);
+    }
+}
+
+void StreamReadCallback(pa_stream *stream, size_t nbytes, void *userData) {
+    const void *data = malloc(sizeof(opus_int16) * nbytes);
+    // Read current data then clear it for next session
+    pa_stream_peek(stream, &data, &nbytes);
+    pa_stream_drop(stream);
+
+    // Send data to Opus for encoding
+    unsigned char *encoded = static_cast<unsigned char*>(malloc(sizeof(unsigned char) * (nbytes)));
+    int res = opus_encode(encoder, static_cast<const opus_int16*>(data), nbytes, encoded, nbytes);
+    if (res < 0) {
+        return;
     }
 }
 
@@ -128,6 +146,10 @@ void PulseRefreshSinks() {
 
 void PulseStop() {
     // Unlock, stop, and free
+    if (paStream) {
+        pa_stream_disconnect(paStream);
+        pa_stream_unref(paStream);
+    }
     if (paContext) {
         pa_context_disconnect(paContext);
         pa_context_unref(paContext);
@@ -169,7 +191,7 @@ std::optional<std::string> PulseSetupAudio(const std::optional<std::string> pass
     if (!tuxSinkFound) {
         // Create a null sink to read from later
         moduleLoadType = 0;
-        op = pa_context_load_module(paContext, "module-null-sink", "sink_name=TuxphonesPassthrough", LoadModuleIndexCallback, static_cast<void*>(&moduleLoadType));
+        op = pa_context_load_module(paContext, "module-null-sink", "sink_name=Tuxphones", LoadModuleIndexCallback, static_cast<void*>(&moduleLoadType));
 
         while (pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
             pa_threaded_mainloop_wait(paMainLoop);
@@ -184,7 +206,7 @@ std::optional<std::string> PulseSetupAudio(const std::optional<std::string> pass
         // Create a combined sink 
         moduleLoadType = 1;
         op = pa_context_load_module(paContext, "module-combine-sink", 
-            (std::string("sink_name=TuxphonesPassthroughCombined sink_properties=slaves=TuxphonesPassthrough,") + passthroughSink).c_str(), 
+            (std::string("sink_name=TuxphonesPassthrough sink_properties=slaves=TuxphonesPassthrough,") + passthroughSink).c_str(), 
             LoadModuleIndexCallback, static_cast<void*>(&moduleLoadType));
 
         while (pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
@@ -268,12 +290,14 @@ std::vector<applicationInfo> PulseGetApplications() {
     return infoVec;
 }
 
-void PulseStartCapture(const pid_t applicationPID) {
+std::optional<std::string> PulseStartCapture(const pid_t applicationPID, const uint32_t bitrate) {
     pa_threaded_mainloop_lock(paMainLoop);
 
     // Set sink input (application) to combined passthrough sink
+    std::optional<applicationInfo> targetApp;
     for (const auto& app : PulseGetApplications()) {
         if (app.pid == applicationPID) {
+            targetApp = app;
             sinkInputRestoreIndex = app.sinkIndex;
             pa_operation *op = pa_context_move_sink_input_by_index(paContext, app.index, combinedSinkIndex, GenericSuccessCallback, nullptr);
 
@@ -284,7 +308,54 @@ void PulseStartCapture(const pid_t applicationPID) {
         }
     }
 
+    // Initialize stream
+    /*pa_proplist *formatProps = pa_proplist_new();
+    if (int error = pa_proplist_set(formatProps, PA_PROP_FORMAT_CHANNEL_MAP, &paChannelMap, sizeof(pa_channel_map))) {
+        PulseStop();
+        return std::string(pa_strerror(error));
+    }
+    if (int error = pa_proplist_sets(formatProps, PA_PROP_FORMAT_SAMPLE_FORMAT, std::to_string(PA_SAMPLE_S16NE).c_str())) {
+        PulseStop();
+        return std::string(pa_strerror(error));
+    }
+    if (int error = pa_proplist_sets(formatProps, PA_PROP_FORMAT_RATE, std::to_string(bitrate).c_str())) {
+        PulseStop();
+        return std::string(pa_strerror(error));
+    }
+
+    pa_format_info info {
+        .encoding = PA_ENCODING_ANY,
+        .plist = formatProps
+    };
+    pa_format_info * const infoPtr = &info;*/
+    pa_sample_spec sampleSpec {
+        .format = PA_SAMPLE_S16NE,
+        .rate = bitrate,
+        .channels = 1
+    };
+
+    pa_channel_map channelMap;
+    channelMap.channels = 1;
+    channelMap.map[0] = PA_CHANNEL_POSITION_MONO;
+
+    paStream = pa_stream_new(paContext, "TuxphonesStream", &sampleSpec, &channelMap);
+    // pa_proplist_free(formatProps);
+
+    pa_stream_set_read_callback(paStream, StreamReadCallback, nullptr);
+
+    // Connects stream to sink monitor
+    if (int error = pa_stream_set_monitor_stream(paStream, targetApp.value().index)) {
+        PulseStop();
+        return std::string(pa_strerror(error));
+    }
+    if (int error = pa_stream_connect_record(paStream, "Tuxphones", nullptr, PA_STREAM_NOFLAGS)) { // might need to change "Tuxphones" to "Tuxphones.monitor"
+        PulseStop();
+        return std::string(pa_strerror(error));
+    }
+
     pa_threaded_mainloop_unlock(paMainLoop);
+
+    return std::nullopt;
 }
 
 void PulseStopCapture() {
@@ -293,6 +364,23 @@ void PulseStopCapture() {
 
 Napi::Value StartCapturingApplicationAudio(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
+
+    if (info.Length() != 2) {
+        throw Napi::Error::New(env, "Wrong number of arguments");
+    }
+
+    if (!(info[0].IsNumber() && info[1].IsNumber())) {
+        throw Napi::Error::New(env, "Args: Number, Number");
+    }
+
+    const uint32_t sampleRate = info[1].ToNumber().Uint32Value();
+
+    // Initialize Opus
+    int error;
+    encoder = opus_encoder_create(sampleRate, 1, OPUS_APPLICATION_AUDIO, &error);
+    if (error) {
+        throw Napi::Error::New(env, opus_strerror(error));
+    }
 
     return env.Undefined();
 }
@@ -333,6 +421,7 @@ Napi::Value OnStart(const Napi::CallbackInfo& info) {
         throw Napi::Error::New(env, "First argument must be either String or null");
     }
 
+    // Initialize Pulse
     std::optional<std::string> result = PulseInit();
     if (result.has_value()) {
         throw Napi::Error::New(env, "Error initializing Pulse: " + result.value());

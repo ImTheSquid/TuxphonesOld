@@ -11,7 +11,7 @@ sed -i "/.*const nativeCodeHex = 'PLACEHOLDER';/d" build.js
 if [[ -f "build/Release/tuxphones.node" ]]; then
     native=`xxd -p build/Release/tuxphones.node | tr -d '\n'`
 else
-    native=`xxd -p build/Debug/tuxphones.node | tr -d '\n'`
+    exit 0
 fi
 
 echo "1iconst nativeCodeHex = '$native';" > build/native.sed
