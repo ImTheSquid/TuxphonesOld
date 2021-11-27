@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 rm -r build/
 npm install --openssl_fips=X
 ./node_modules/.bin/node-gyp --openssl_fips=X rebuild --target=13.4.0 --arch=x64 --dist-url=https://electronjs.org/headers/ --debug
@@ -8,8 +8,14 @@ cp index.js build.js
 sed -i '/module\.exports = (Plugin, Library) => {/d' build.js
 sed -i "/.*const nativeCodeHex = 'PLACEHOLDER';/d" build.js
 
-native=`xxd -p build/Release/tuxphones.node | tr -d '\n'`
-sed -i "1iconst nativeCodeHex = '$native';" build.js
+if [[ -f "build/Release/tuxphones.node" ]]; then
+    native=`xxd -p build/Release/tuxphones.node | tr -d '\n'`
+else
+    native=`xxd -p build/Debug/tuxphones.node | tr -d '\n'`
+fi
+
+echo "1iconst nativeCodeHex = '$native';" > build/native.sed
+sed -i  -f build/native.sed build.js
 sed -i '1i"use strict";' build.js
 sed -i '1imodule.exports = (Plugin, Library) => {' build.js
 
