@@ -40,6 +40,7 @@ pa_context *paContext;
 pa_context_state paContextState = PA_CONTEXT_UNCONNECTED;
 // Current audio stream
 pa_stream *paStream;
+pa_stream_state paStreamState = PA_STREAM_UNCONNECTED;
 // Found audio sinks
 std::vector<paSinkInfo> foundSinks;
 // Tuxphones sink ID
@@ -53,7 +54,7 @@ std::optional<applicationInfo> targetApp;
 // Opus encoder
 OpusEncoder *encoder;
 
-Napi::FunctionReference encodeCallback;
+Napi::Function encodeCallback;
 
 void GetSinkInfoCallback(pa_context *context, const pa_sink_info *info, int eol, void *userData) {
     // Copy data to foundSinks
@@ -119,21 +120,29 @@ void StreamReadCallback(pa_stream *stream, size_t nbytes, void *userData) {
 
     // Send data to Opus for encoding
     uint8_t *encoded = static_cast<uint8_t*>(malloc(sizeof(uint8_t) * (nbytes)));
-    int res = opus_encode(encoder, static_cast<const opus_int16*>(data), nbytes, encoded, nbytes);
+    opus_int32 res = opus_encode(encoder, static_cast<const opus_int16*>(data), nbytes, encoded, nbytes);
     if (res < 0) {
         free(encoded);
         return;
     }
 
-    Napi::Uint8Array arr = Napi::Uint8Array();
+    /*Napi::Uint8Array arr = Napi::Uint8Array::New(encodeCallback.Env(), res);
 
-    for (size_t i = 0; i < nbytes; ++i) {
+    for (opus_int32 i = 0; i < res; ++i) {
         arr[i] = encoded[i];
-    }
+    }*/
+
+    Napi::HandleScope scope(encodeCallback.Env());
     
-    encodeCallback.Value().Call({ arr });
+    encodeCallback.Call({ });
     
     free(encoded);
+}
+
+void StreamStateCallback(pa_stream *stream, void *userData) {
+    paStreamState = pa_stream_get_state(stream);
+
+    pa_threaded_mainloop_signal(paMainLoop, 0);
 }
 
 void PulseRefreshSinks() {
@@ -192,7 +201,7 @@ std::optional<std::string> PulseSetupAudio(const std::optional<std::string> pass
     if (!tuxSinkFound) {
         // Create a null sink to read from later
         moduleLoadType = 0;
-        op = pa_context_load_module(paContext, "module-null-sink", "sink_name=Tuxphones", LoadModuleIndexCallback, static_cast<void*>(&moduleLoadType));
+        op = pa_context_load_module(paContext, "module-null-sink", "sink_name=tuxphones sink_properties=device.description=tuxphones", LoadModuleIndexCallback, static_cast<void*>(&moduleLoadType));
 
         while (pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
             pa_threaded_mainloop_wait(paMainLoop);
@@ -207,7 +216,7 @@ std::optional<std::string> PulseSetupAudio(const std::optional<std::string> pass
         // Create a combined sink 
         moduleLoadType = 1;
         op = pa_context_load_module(paContext, "module-combine-sink", 
-            (std::string("sink_name=TuxphonesPassthrough sink_properties=slaves=TuxphonesPassthrough,") + passthroughSink).c_str(), 
+            (std::string("sink_name=tuxphones-combined sink_properties=device-description=tuxphones-combined slaves=tuxphones,") + passthroughSink).c_str(), 
             LoadModuleIndexCallback, static_cast<void*>(&moduleLoadType));
 
         while (pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
@@ -277,8 +286,10 @@ void PulseTeardownAudio() {
     pa_threaded_mainloop_unlock(paMainLoop);
 }
 
-std::vector<applicationInfo> PulseGetApplications() {
-    pa_threaded_mainloop_lock(paMainLoop);
+std::vector<applicationInfo> PulseGetApplications(bool lock) {
+    if (lock) {
+        pa_threaded_mainloop_lock(paMainLoop);
+    }
     std::vector<applicationInfo> infoVec;
     pa_operation *op = pa_context_get_sink_input_info_list(paContext, GetSinkInputInfoCallback, static_cast<void*>(&infoVec));
 
@@ -287,7 +298,9 @@ std::vector<applicationInfo> PulseGetApplications() {
     }
     pa_operation_unref(op);
 
-    pa_threaded_mainloop_unlock(paMainLoop);
+    if (lock) {
+        pa_threaded_mainloop_unlock(paMainLoop);
+    }
     return infoVec;
 }
 
@@ -295,11 +308,15 @@ std::optional<std::string> PulseStartCapture(const pid_t applicationPID, const u
     pa_threaded_mainloop_lock(paMainLoop);
 
     // Set sink input (application) to combined passthrough sink
-    for (const auto& app : PulseGetApplications()) {
+    for (const auto& app : PulseGetApplications(false)) {
         if (app.pid == applicationPID) {
             targetApp = app;
             sinkInputRestoreIndex = app.sinkIndex;
             pa_operation *op = pa_context_move_sink_input_by_index(paContext, app.index, combinedSinkIndex, GenericSuccessCallback, nullptr);
+
+            if (!op) {
+                return "Failed to move sink input";
+            }
 
             while(pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
                 pa_threaded_mainloop_wait(paMainLoop);
@@ -338,19 +355,32 @@ std::optional<std::string> PulseStartCapture(const pid_t applicationPID, const u
     channelMap.channels = 1;
     channelMap.map[0] = PA_CHANNEL_POSITION_MONO;
 
-    paStream = pa_stream_new(paContext, "TuxphonesStream", &sampleSpec, &channelMap);
+    paStream = pa_stream_new(paContext, "tuxphones-stream", &sampleSpec, &channelMap);
     // pa_proplist_free(formatProps);
 
+    pa_stream_set_state_callback(paStream, StreamStateCallback, nullptr);
     pa_stream_set_read_callback(paStream, StreamReadCallback, nullptr);
 
     // Connects stream to sink monitor
     if (int error = pa_stream_set_monitor_stream(paStream, targetApp.value().index)) {
-        PulseStop();
+        pa_stream_disconnect(paStream);
+        pa_stream_unref(paStream);
         return std::string(pa_strerror(error));
     }
-    if (int error = pa_stream_connect_record(paStream, "Tuxphones", nullptr, PA_STREAM_NOFLAGS)) { // might need to change "Tuxphones" to "Tuxphones.monitor"
-        PulseStop();
+    if (int error = pa_stream_connect_record(paStream, nullptr, nullptr, PA_STREAM_NOFLAGS)) { // might need to change "tuxphones" to "tuxphones.monitor"
+        pa_stream_disconnect(paStream);
+        pa_stream_unref(paStream);
         return std::string(pa_strerror(error));
+    }
+
+    while(paStreamState == PA_STREAM_UNCONNECTED || (PA_STREAM_IS_GOOD(paStreamState) && paStreamState != PA_STREAM_READY)) {
+        pa_threaded_mainloop_wait(paMainLoop);
+    }
+
+    if (paStreamState != PA_STREAM_READY) {
+        pa_stream_disconnect(paStream);
+        pa_stream_unref(paStream);
+        return "Stream failed to connect: " + std::string(pa_strerror(pa_context_errno(paContext)));
     }
 
     pa_threaded_mainloop_unlock(paMainLoop);
@@ -401,8 +431,13 @@ Napi::Value StartCapturingApplicationAudio(const Napi::CallbackInfo& info) {
         throw Napi::Error::New(env, "Opus Error: " + std::string(opus_strerror(error)));
     }
 
-    encodeCallback = Napi::Persistent(info[2].As<Napi::Function>());
-    PulseStartCapture(info[0].ToNumber().Uint32Value(), sampleRate);
+    Napi::EscapableHandleScope escape(env);
+
+    encodeCallback = escape.Escape(info[2].As<Napi::Function>()).As<Napi::Function>();
+    std::optional<std::string> startError = PulseStartCapture(info[0].ToNumber().Uint32Value(), sampleRate);
+    if (startError.has_value()) {
+        return Napi::String::From(env, startError.value());
+    }
 
     return env.Undefined();
 }
@@ -421,7 +456,7 @@ Napi::Value StopCapturingApplicationAudio(const Napi::CallbackInfo& info) {
 Napi::Value GetAudioApplications(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
 
-    std::vector<applicationInfo> infoVec = PulseGetApplications();
+    std::vector<applicationInfo> infoVec = PulseGetApplications(true);
 
     Napi::Array arr = Napi::Array::New(env);
 
