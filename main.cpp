@@ -48,9 +48,12 @@ uint32_t tuxphonesSinkIndex;
 uint32_t combinedSinkIndex;
 // Original application sink, held while capturing to be able to restore functionality
 uint32_t sinkInputRestoreIndex;
+std::optional<applicationInfo> targetApp;
 
 // Opus encoder
 OpusEncoder *encoder;
+
+Napi::FunctionReference encodeCallback;
 
 void GetSinkInfoCallback(pa_context *context, const pa_sink_info *info, int eol, void *userData) {
     // Copy data to foundSinks
@@ -90,15 +93,17 @@ void GetSinkInputInfoCallback(pa_context *context, const pa_sink_input_info *inf
     auto *infoVec = static_cast<std::vector<applicationInfo>*>(userData);
     if (info) {
         const char *pid = pa_proplist_gets(info->proplist, "application.process.id");
-        char *str = static_cast<char*>(malloc(strlen(pid) + 1));
-        strcpy(str, pid);
-        infoVec->push_back(applicationInfo{
-            .name = std::string(info->name),
-            .pid = atoi(str),
-            .index = info->index,
-            .sinkIndex = info->sink
-        });
-        free(str);
+        if (pid) {
+            char *str = static_cast<char*>(malloc(strlen(pid) + 1));
+            strcpy(str, pid);
+            infoVec->push_back(applicationInfo{
+                .name = std::string(info->name),
+                .pid = atoi(str),
+                .index = info->index,
+                .sinkIndex = info->sink
+            });
+            free(str);
+        }
     }
 
     if (eol) {
@@ -113,26 +118,22 @@ void StreamReadCallback(pa_stream *stream, size_t nbytes, void *userData) {
     pa_stream_drop(stream);
 
     // Send data to Opus for encoding
-    unsigned char *encoded = static_cast<unsigned char*>(malloc(sizeof(unsigned char) * (nbytes)));
+    uint8_t *encoded = static_cast<uint8_t*>(malloc(sizeof(uint8_t) * (nbytes)));
     int res = opus_encode(encoder, static_cast<const opus_int16*>(data), nbytes, encoded, nbytes);
     if (res < 0) {
+        free(encoded);
         return;
     }
-}
 
-std::string RandString(const int len) {
-    static const char alphanum[] =
-        "0123456789"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "abcdefghijklmnopqrstuvwxyz";
-    std::string tmp_s;
-    tmp_s.reserve(len);
+    Napi::Uint8Array arr = Napi::Uint8Array();
 
-    for (int i = 0; i < len; ++i) {
-        tmp_s += alphanum[rand() % (sizeof(alphanum) - 1)];
+    for (size_t i = 0; i < nbytes; ++i) {
+        arr[i] = encoded[i];
     }
     
-    return tmp_s;
+    encodeCallback.Value().Call({ arr });
+    
+    free(encoded);
 }
 
 void PulseRefreshSinks() {
@@ -294,7 +295,6 @@ std::optional<std::string> PulseStartCapture(const pid_t applicationPID, const u
     pa_threaded_mainloop_lock(paMainLoop);
 
     // Set sink input (application) to combined passthrough sink
-    std::optional<applicationInfo> targetApp;
     for (const auto& app : PulseGetApplications()) {
         if (app.pid == applicationPID) {
             targetApp = app;
@@ -359,18 +359,37 @@ std::optional<std::string> PulseStartCapture(const pid_t applicationPID, const u
 }
 
 void PulseStopCapture() {
+    pa_threaded_mainloop_lock(paMainLoop);
 
+    if (targetApp.has_value()) {
+        pa_operation *op = pa_context_move_sink_input_by_index(paContext, targetApp.value().index, sinkInputRestoreIndex, GenericSuccessCallback, nullptr);
+
+        while(pa_operation_get_state(op) == PA_OPERATION_RUNNING) {
+            pa_threaded_mainloop_wait(paMainLoop);
+        }
+        pa_operation_unref(op);
+
+        targetApp = std::nullopt;
+    }
+
+    pa_stream_disconnect(paStream);
+    paStream = nullptr;
+
+    pa_threaded_mainloop_unlock(paMainLoop);
 }
 
 Napi::Value StartCapturingApplicationAudio(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
-
-    if (info.Length() != 2) {
-        throw Napi::Error::New(env, "Wrong number of arguments");
+    if (encoder || paStream) {
+        throw Napi::Error::New(env, "Capture already started. Stop capture before attempting to start again");
     }
 
-    if (!(info[0].IsNumber() && info[1].IsNumber())) {
-        throw Napi::Error::New(env, "Args: Number, Number");
+    if (info.Length() != 3) {
+        throw Napi::Error::New(env, "Wrong number of arguments, expected 3");
+    }
+
+    if (!(info[0].IsNumber() && info[1].IsNumber() && info[2].IsFunction())) {
+        throw Napi::Error::New(env, "Args: pid: Number, sampleRate: Number, callback: Function(Uint8Array)");
     }
 
     const uint32_t sampleRate = info[1].ToNumber().Uint32Value();
@@ -379,14 +398,21 @@ Napi::Value StartCapturingApplicationAudio(const Napi::CallbackInfo& info) {
     int error;
     encoder = opus_encoder_create(sampleRate, 1, OPUS_APPLICATION_AUDIO, &error);
     if (error) {
-        throw Napi::Error::New(env, opus_strerror(error));
+        throw Napi::Error::New(env, "Opus Error: " + std::string(opus_strerror(error)));
     }
+
+    encodeCallback = Napi::Persistent(info[2].As<Napi::Function>());
+    PulseStartCapture(info[0].ToNumber().Uint32Value(), sampleRate);
 
     return env.Undefined();
 }
 
 Napi::Value StopCapturingApplicationAudio(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
+
+    PulseStopCapture();
+    opus_encoder_destroy(encoder);
+    encoder = nullptr;
 
     return env.Undefined();
 }
@@ -414,11 +440,11 @@ Napi::Value OnStart(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
 
     if (info.Length() != 1) {
-        throw Napi::Error::New(env, "Wrong number of arguments");
+        throw Napi::Error::New(env, "Wrong number of arguments, expected 1");
     }
 
     if (!(info[0].IsString() || info[0].IsNull())) {
-        throw Napi::Error::New(env, "First argument must be either String or null");
+        throw Napi::Error::New(env, "Args: overrideDevice: String|null");
     }
 
     // Initialize Pulse
