@@ -54,7 +54,7 @@ std::optional<applicationInfo> targetApp;
 // Opus encoder
 OpusEncoder *encoder;
 
-Napi::Function encodeCallback;
+Napi::ThreadSafeFunction encodeCallback;
 
 void GetSinkInfoCallback(pa_context *context, const pa_sink_info *info, int eol, void *userData) {
     // Copy data to foundSinks
@@ -126,17 +126,33 @@ void StreamReadCallback(pa_stream *stream, size_t nbytes, void *userData) {
         return;
     }
 
-    /*Napi::Uint8Array arr = Napi::Uint8Array::New(encodeCallback.Env(), res);
+    typedef struct {
+        uint8_t *data;
+        opus_int32 length;
+    } jsCallbackData;
 
-    for (opus_int32 i = 0; i < res; ++i) {
-        arr[i] = encoded[i];
-    }*/
+    // Create intermediary callback to facilitate C++ to JS data conversion
+    auto callback = [](Napi::Env env, Napi::Function jsCallback, jsCallbackData *data) {
+        Napi::Uint8Array arr = Napi::Uint8Array::New(env, data->length);
 
-    Napi::HandleScope scope(encodeCallback.Env());
-    
-    encodeCallback.Call({ });
-    
-    free(encoded);
+        for (opus_int32 i = 0; i < data->length; ++i) {
+            arr[i] = data->data[i];
+        }
+        
+        free(data->data);
+        free(data);
+
+        jsCallback.Call({ arr });
+    };
+
+    jsCallbackData *callbackData = static_cast<jsCallbackData*>(malloc(sizeof(jsCallbackData)));
+    callbackData->length = res;
+    callbackData->data = encoded;
+
+    if (encodeCallback.BlockingCall(callbackData, callback) != napi_ok) {
+        free(encoded);
+        free(callbackData);
+    }
 }
 
 void StreamStateCallback(pa_stream *stream, void *userData) {
@@ -326,25 +342,6 @@ std::optional<std::string> PulseStartCapture(const pid_t applicationPID, const u
     }
 
     // Initialize stream
-    /*pa_proplist *formatProps = pa_proplist_new();
-    if (int error = pa_proplist_set(formatProps, PA_PROP_FORMAT_CHANNEL_MAP, &paChannelMap, sizeof(pa_channel_map))) {
-        PulseStop();
-        return std::string(pa_strerror(error));
-    }
-    if (int error = pa_proplist_sets(formatProps, PA_PROP_FORMAT_SAMPLE_FORMAT, std::to_string(PA_SAMPLE_S16NE).c_str())) {
-        PulseStop();
-        return std::string(pa_strerror(error));
-    }
-    if (int error = pa_proplist_sets(formatProps, PA_PROP_FORMAT_RATE, std::to_string(bitrate).c_str())) {
-        PulseStop();
-        return std::string(pa_strerror(error));
-    }
-
-    pa_format_info info {
-        .encoding = PA_ENCODING_ANY,
-        .plist = formatProps
-    };
-    pa_format_info * const infoPtr = &info;*/
     pa_sample_spec sampleSpec {
         .format = PA_SAMPLE_S16NE,
         .rate = bitrate,
@@ -433,7 +430,7 @@ Napi::Value StartCapturingApplicationAudio(const Napi::CallbackInfo& info) {
 
     Napi::EscapableHandleScope escape(env);
 
-    encodeCallback = escape.Escape(info[2].As<Napi::Function>()).As<Napi::Function>();
+    encodeCallback = Napi::ThreadSafeFunction::New(env, info[2].As<Napi::Function>(), "OpusStreamData", 0, 1);
     std::optional<std::string> startError = PulseStartCapture(info[0].ToNumber().Uint32Value(), sampleRate);
     if (startError.has_value()) {
         return Napi::String::From(env, startError.value());

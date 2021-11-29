@@ -10,7 +10,8 @@ module.exports = (Plugin, Library) => {
             BdApi.showToast('Native code loaded!', {type: 'success'});
         }
 
-        onStart() {
+        // Write native code before start to allow for starting and stopping the plugin without crashing BD
+        load() {
             // Make sure loading fails on incpomatible OSes
             if (process.platform !== 'linux') {
                 BdApi.showToast('Incompatible OS.', {type: 'error'});
@@ -18,7 +19,9 @@ module.exports = (Plugin, Library) => {
             }
 
             this.writeNativeCode();
+        }
 
+        onStart() {
             this.nativeCode.onStart(null);
 
             this.goLiveModal = WebpackModules.find(mod => mod.default?.displayName === "GoLiveModal");

@@ -24,14 +24,17 @@ async function test() {
             console.log('Done');
             module.stopCapturingApplicationAudio();
             module.onStop();
+            console.log('Finishing up...');
             clearTimeout(timer);
+            process.exit(0);
         }).catch(rej => {
             console.log(`ERROR! ${rej}`);
             clearTimeout(timer);
+            process.exit(1);
         });
     } else {
         module.onStop();
     }
 }
 
-Promise.all([test()]);
+test();
