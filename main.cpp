@@ -7,7 +7,6 @@
 #include <pulse/context.h>
 #include <pulse/introspect.h>
 #include <pulse/def.h>
-#include <pulse/proplist.h>
 
 // Opus to encode audio
 #include <opus/opus.h>
@@ -364,7 +363,7 @@ std::optional<std::string> PulseStartCapture(const pid_t applicationPID, const u
         pa_stream_unref(paStream);
         return std::string(pa_strerror(error));
     }
-    if (int error = pa_stream_connect_record(paStream, nullptr, nullptr, PA_STREAM_NOFLAGS)) { // might need to change "tuxphones" to "tuxphones.monitor"
+    if (int error = pa_stream_connect_record(paStream, nullptr, nullptr, PA_STREAM_NOFLAGS)) { // If stream turns out to not encode fast enough, decrease amount of data encoded per cycle
         pa_stream_disconnect(paStream);
         pa_stream_unref(paStream);
         return std::string(pa_strerror(error));
