@@ -1,0 +1,2 @@
+# Tuxphones
+Tuxphones allows Linux users with PulseAudio to share application audio while streaming through a simple, seamless interface. Since Tuxphones uses native code to record and encode audio, **compatibility with your install is not guaranteed.** However, pull requests to improve compatibility are welcome.
