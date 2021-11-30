@@ -1,6 +1,35 @@
 module.exports = (Plugin, Library) => {
     const nativeCodeHex = 'PLACEHOLDER';
-    const { Patcher, WebpackModules } = Library;
+    const { Logger, Patcher, WebpackModules, DiscordModules, DiscordClasses } = Library;
+    const { React } = DiscordModules;
+
+    class FormItemOverride extends React.Component {
+        constructor(props) {
+            super(props);
+            this.onSelectionChange = this.onSelectionChange.bind(this);
+            this.options = [];
+
+            for (let i = 0; i < props.apps.length; i++) {
+                this.options.push({value: i, label: props.apps[i].name, app: props.apps[i]});
+            }
+
+            this.state = {
+                value: 1
+            };
+
+            this.formItem = WebpackModules.find(mod => mod.default?.displayName === 'FormItem');
+            this.singleSelect = WebpackModules.find(mod => mod.SingleSelect?.displayName === 'SingleSelect');
+        }
+
+        onSelectionChange(val) {
+            this.setState({value: val});
+        }
+
+        render() {
+            const single = this.singleSelect.SingleSelect({onChange: this.onSelectionChange, options: this.options, value: this.state.value});
+            return this.formItem.default({title: 'Audio Source', children: single, className: 'modalPadding'});
+        }
+    }
 
     class Tuxphones extends Plugin {
         writeNativeCode() {
@@ -24,10 +53,23 @@ module.exports = (Plugin, Library) => {
         onStart() {
             this.nativeCode.onStart(null);
 
-            this.goLiveModal = WebpackModules.find(mod => mod.default?.displayName === "GoLiveModal");
+            BdApi.injectCSS('tuxphones', '.modalPadding { padding: 8px 16px; }')
 
-            Patcher.after(this.goLiveModal, "default", (_, [arg], ret) => {
-                
+            this.goLiveModal = WebpackModules.find(mod => mod.default?.displayName === 'Confirm');
+            this.formTitle = WebpackModules.find(mod => mod.default?.displayName === 'FormTitle');
+
+            Patcher.after(this.goLiveModal, 'default', (_, [arg], ret) => {
+                if (!Array.isArray(ret.props.children)) {
+                    return;
+                }
+
+                const audioApps = this.nativeCode.getAudioApplications();
+                if (audioApps.length > 0) {
+                    ret.props.children[1] = React.createElement(FormItemOverride, {apps: audioApps});
+                } else {
+                    ret.props.children[1].props.text = 'Tuxphones couldn\'t detect any audio applications.';
+                }
+                Logger.log(ret);
             });
         }
 
@@ -36,6 +78,9 @@ module.exports = (Plugin, Library) => {
         }
 
         onStop() {
+            Patcher.unpatchAll();
+            BdApi.clearCSS('tuxphones');
+
             this.nativeCode.onStop();
         }
     }

@@ -96,8 +96,9 @@ void GetSinkInputInfoCallback(pa_context *context, const pa_sink_input_info *inf
         if (pid) {
             char *str = static_cast<char*>(malloc(strlen(pid) + 1));
             strcpy(str, pid);
+            const std::string combinedName = std::string(pa_proplist_gets(info->proplist, "application.name")) + ": " +  std::string(pa_proplist_gets(info->proplist, "media.name"));
             infoVec->push_back(applicationInfo{
-                .name = std::string(info->name),
+                .name = combinedName,
                 .pid = atoi(str),
                 .index = info->index,
                 .sinkIndex = info->sink
