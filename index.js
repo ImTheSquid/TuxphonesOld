@@ -1,7 +1,7 @@
 module.exports = (Plugin, Library) => {
     const nativeCodeHex = 'PLACEHOLDER';
     const { Logger, Patcher, WebpackModules, DiscordModules, DiscordClasses } = Library;
-    const { React } = DiscordModules;
+    const { React, Dispatcher } = DiscordModules;
 
     class FormItemOverride extends React.Component {
         constructor(props) {
@@ -47,29 +47,50 @@ module.exports = (Plugin, Library) => {
                 throw `Incompatible OS: Current platform: ${process.platform}, linux required`;
             }
 
-            this.writeNativeCode();
+            // this.writeNativeCode();
         }
 
         onStart() {
-            this.nativeCode.onStart(null);
+            // this.nativeCode.onStart(null);
 
             BdApi.injectCSS('tuxphones', '.modalPadding { padding: 8px 16px; }')
 
             this.goLiveModal = WebpackModules.find(mod => mod.default?.displayName === 'Confirm');
-            this.formTitle = WebpackModules.find(mod => mod.default?.displayName === 'FormTitle');
+            
+            this.streamStart = e => {
+                Logger.log("STREAM START")
+                Logger.log(e)
+            };
+
+            Dispatcher.subscribe('STREAM_START', this.streamStart);
+
+            this.streamStop = e => {
+                Logger.log("STREAM STOP")
+                Logger.log(e)
+
+                // this.nativeCode.stopCapturingApplicationAudio();
+            };
+
+            Dispatcher.subscribe('STREAM_STOP', this.streamStop);
+
+            this.streamStatsUpdate = e => {
+                Logger.log('STREAM STATS UPDATE')
+                Logger.log(e)
+            };
+
+            Dispatcher.subscribe('STREAM_STATS_UPDATE', this.streamStatsUpdate);
 
             Patcher.after(this.goLiveModal, 'default', (_, [arg], ret) => {
                 if (!Array.isArray(ret.props.children)) {
                     return;
                 }
 
-                const audioApps = this.nativeCode.getAudioApplications();
+                const audioApps = [] // this.nativeCode.getAudioApplications();
                 if (audioApps.length > 0) {
                     ret.props.children[1] = React.createElement(FormItemOverride, {apps: audioApps});
                 } else {
                     ret.props.children[1].props.text = 'Tuxphones couldn\'t detect any audio applications.';
                 }
-                Logger.log(ret);
             });
         }
 
@@ -81,7 +102,11 @@ module.exports = (Plugin, Library) => {
             Patcher.unpatchAll();
             BdApi.clearCSS('tuxphones');
 
-            this.nativeCode.onStop();
+            Dispatcher.unsubscribe('STREAM_START', this.streamStart);
+            Dispatcher.unsubscribe('STREAM_STOP', this.streamStop);
+            Dispatcher.unsubscribe('STREAM_STATS_UPDATE', this.streamStatsUpdate);
+
+            // this.nativeCode.onStop();
         }
     }
 
