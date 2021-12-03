@@ -51,6 +51,7 @@ module.exports = (Plugin, Library) => {
         }
 
         onStart() {
+            this.streamInfo = null;
             // this.nativeCode.onStart(null);
 
             BdApi.injectCSS('tuxphones', '.modalPadding { padding: 8px 16px; }')
@@ -73,13 +74,6 @@ module.exports = (Plugin, Library) => {
 
             Dispatcher.subscribe('STREAM_STOP', this.streamStop);
 
-            this.streamStatsUpdate = e => {
-                Logger.log('STREAM STATS UPDATE')
-                Logger.log(e)
-            };
-
-            Dispatcher.subscribe('STREAM_STATS_UPDATE', this.streamStatsUpdate);
-
             Patcher.after(this.goLiveModal, 'default', (_, [arg], ret) => {
                 if (!Array.isArray(ret.props.children)) {
                     return;
@@ -91,6 +85,29 @@ module.exports = (Plugin, Library) => {
                 } else {
                     ret.props.children[1].props.text = 'Tuxphones couldn\'t detect any audio applications.';
                 }
+            });
+
+            this.streamController = WebpackModules.getByProps('setH264Enabled');
+
+            Patcher.after(this.streamController, 'create', (_, args, ret) => {
+                // If it isn't the user starting the stream, return
+                if (args[1] !== args[9]) {
+                    return;
+                }
+
+                if (!args[5].includes('xsalsa20_poly1305_lite')) {
+                    throw 'Stream failed: xsalsa20_poly1305_lite scheme not supported by server';
+                }
+
+                Logger.log(args);
+                Logger.log(ret);
+
+                this.streamInfo = {
+                    serverIP: args[3],
+                    serverPort: args[4],
+                    encryptionModes: args[5],
+                    targetSSRC: args[7][0].ssrc
+                };
             });
         }
 
